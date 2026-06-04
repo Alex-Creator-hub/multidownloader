@@ -208,7 +208,14 @@ export default function Home() {
       const xhr = new XMLHttpRequest();
       xhrRefs.current.set(idx, xhr);
 
-      xhr.open("GET", `/api/download?url=${encodeURIComponent(fmt.url)}`);
+      // Use direct download for YouTube (faster, no Vercel proxy)
+      // Only use proxy for platforms that need CORS bypass
+      const useProxy = !fmt.url.includes("googlevideo.com");
+      const downloadUrl = useProxy
+        ? `/api/download?url=${encodeURIComponent(fmt.url)}`
+        : fmt.url;
+
+      xhr.open("GET", downloadUrl);
       xhr.responseType = "blob";
 
       xhr.onprogress = (e) => {
