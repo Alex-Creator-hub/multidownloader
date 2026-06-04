@@ -34,7 +34,7 @@ type Status = "idle" | "parsing" | "success" | "error";
 
 /* ─── per-card download state ─── */
 interface DownloadState {
-  status: "idle" | "downloading" | "done" | "error";
+  status: "idle" | "downloading" | "done" | "error" | "paused";
   progress: number; // 0–100
 }
 
@@ -186,7 +186,7 @@ export default function Home() {
     [],
   );
 
-  /* ── download single file via XHR with progress ── */
+  /* ── download single file via XHR with progress + auto-resume ── */
   const downloadSingle = useCallback(
     (idx: number) => {
       const item = mediaList[idx];
@@ -198,34 +198,34 @@ export default function Home() {
         return;
       }
 
-      // update state to downloading
+      const st = dlStates[idx];
+      const startByte = st?.status === "paused" ? Math.round((st.progress / 100) * 1024 * 1024) : 0;
+
       setDlStates((prev) => {
         const next = [...prev];
-        next[idx] = { status: "downloading", progress: 0 };
+        next[idx] = { status: "downloading", progress: prev[idx]?.progress || 0 };
         return next;
       });
 
       const xhr = new XMLHttpRequest();
       xhrRefs.current.set(idx, xhr);
 
-      // Use direct download for YouTube (faster, no Vercel proxy)
-      // Only use proxy for platforms that need CORS bypass
-      const useProxy = !fmt.url.includes("googlevideo.com");
-      const downloadUrl = useProxy
-        ? `/api/download?url=${encodeURIComponent(fmt.url)}`
-        : fmt.url;
-
-      xhr.open("GET", downloadUrl);
+      xhr.open("GET", fmt.url);
+      if (startByte > 0) {
+        xhr.setRequestHeader("Range", `bytes=${startByte}-`);
+      }
       xhr.responseType = "blob";
+
+      let lastProgress = startByte > 0 ? st.progress : 0;
 
       xhr.onprogress = (e) => {
         if (e.lengthComputable) {
-          const pct = Math.round((e.loaded / e.total) * 100);
+          const totalSize = startByte > 0 ? e.total + startByte : e.total;
+          const pct = Math.round(((startByte + e.loaded) / totalSize) * 100);
+          lastProgress = pct;
           setDlStates((prev) => {
             const next = [...prev];
-            if (next[idx]?.status === "downloading") {
-              next[idx].progress = pct;
-            }
+            if (next[idx]?.status === "downloading") next[idx].progress = pct;
             return next;
           });
         }
@@ -233,42 +233,52 @@ export default function Home() {
 
       xhr.onload = () => {
         xhrRefs.current.delete(idx);
-        if (xhr.status !== 200) {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          const blob = xhr.response as Blob;
+          triggerDownload(blob, item.title || `video_${idx}`);
           setDlStates((prev) => {
             const next = [...prev];
-            next[idx] = { status: "error", progress: 0 };
+            next[idx] = { status: "done", progress: 100 };
             return next;
           });
-          return;
+        } else if (xhr.status === 206) {
+          // Partial content — range request worked, same as success
+          const blob = xhr.response as Blob;
+          triggerDownload(blob, item.title || `video_${idx}`);
+          setDlStates((prev) => {
+            const next = [...prev];
+            next[idx] = { status: "done", progress: 100 };
+            return next;
+          });
+        } else {
+          setDlStates((prev) => {
+            const next = [...prev];
+            next[idx] = { status: "error", progress: lastProgress };
+            return next;
+          });
         }
-        const blob = xhr.response as Blob;
-        triggerDownload(blob, item.title || `video_${idx}`);
-        setDlStates((prev) => {
-          const next = [...prev];
-          next[idx] = { status: "done", progress: 100 };
-          return next;
-        });
       };
 
       xhr.onerror = () => {
         xhrRefs.current.delete(idx);
+        // Save progress and pause — user can retry to resume
         setDlStates((prev) => {
           const next = [...prev];
-          next[idx] = { status: "error", progress: 0 };
+          if (next[idx]) next[idx] = { status: "paused", progress: lastProgress };
           return next;
         });
       };
 
       xhr.send();
     },
-    [mediaList, qualityIdx],
+    [mediaList, qualityIdx, dlStates],
   );
 
   /* ── save all ── */
   const handleSaveAll = useCallback(() => {
     for (let i = 0; i < mediaList.length; i++) {
       const st = dlStates[i];
-      if (st?.status === "idle" || st?.status === "error") {
+      if (st?.status === "idle" || st?.status === "error" || st?.status === "paused") {
         downloadSingle(i);
       }
     }
@@ -564,29 +574,35 @@ function MediaCard({
             onClick={handleDL}
             disabled={state.status === "downloading" || state.status === "done"}
             className="shrink-0 btn-primary inline-flex items-center justify-center size-9 rounded-xl text-white disabled:opacity-40 disabled:pointer-events-none transition-all"
-            title="保存到手机"
+            title={state.status === "paused" ? "继续下载" : "保存到手机"}
           >
             {state.status === "done" ? (
               <CheckCircle2 className="size-4" />
             ) : state.status === "downloading" ? (
               <Loader2 className="size-4 animate-spin" />
+            ) : state.status === "paused" ? (
+              <Download className="size-4 animate-pulse" />
             ) : (
               <Download className="size-4" />
             )}
           </button>
         </div>
 
-        {/* progress bar */}
-        {state.status === "downloading" && (
+        {/* progress bar — shown for both downloading and paused */}
+        {(state.status === "downloading" || state.status === "paused") && (
           <div className="space-y-1 animate-fade-in-up">
             <div className="h-1.5 w-full rounded-full bg-slate-800 overflow-hidden">
               <div
-                className="h-full rounded-full bg-gradient-to-r from-violet-500 to-sky-500 progress-active transition-all duration-300 ease-out"
+                className={`h-full rounded-full transition-all duration-300 ease-out ${
+                  state.status === "paused"
+                    ? "bg-zinc-600"
+                    : "bg-gradient-to-r from-violet-500 to-sky-500 progress-active"
+                }`}
                 style={{ width: `${state.progress}%` }}
               />
             </div>
             <div className="flex items-center justify-between text-[10px] text-zinc-500">
-              <span>下载中...</span>
+              <span>{state.status === "paused" ? "已暂停" : "下载中..."}</span>
               <span className="tabular-nums">{state.progress}%</span>
             </div>
           </div>
