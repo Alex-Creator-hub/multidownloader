@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@distube/ytdl-core": "^4.16.12",
+    "@fontsource/syne": "^5.2.7",
     "lucide-react": "^1.17.0",
     "next": "^16.2.7",
     "react": "^19.2.4",
