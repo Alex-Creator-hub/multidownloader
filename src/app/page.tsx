@@ -5,10 +5,7 @@ import {
   Search,
   X,
   PlaySquare,
-  Music2,
-  MessageCircle,
   MessageSquare,
-  Film,
   Loader2,
   CheckCircle2,
   AlertCircle,
@@ -39,47 +36,25 @@ interface DownloadState {
 }
 
 /* ─── platforms ─── */
-type Platform =
-  | "youtube"
-  | "douyin"
-  | "xiaohongshu"
-  | "kuaishou"
-  | "twitter"
-  | "unknown";
+type Platform = "twitter" | "unknown";
 
-const platformIcons: Record<Platform, typeof PlaySquare> = {
-  youtube: PlaySquare,
-  douyin: Music2,
-  xiaohongshu: MessageCircle,
-  kuaishou: Film,
+const platformIcons: Record<Platform, typeof Search> = {
   twitter: MessageSquare,
   unknown: Search,
 };
 
 const platformColors: Record<Platform, string> = {
-  youtube: "text-red-400",
-  douyin: "text-pink-400",
-  xiaohongshu: "text-red-300",
-  kuaishou: "text-yellow-400",
   twitter: "text-sky-400",
   unknown: "text-zinc-400",
 };
 
 const platformLabels: Record<Platform, string> = {
-  youtube: "YouTube",
-  douyin: "抖音",
-  xiaohongshu: "小红书",
-  kuaishou: "快手",
   twitter: "X (Twitter)",
   unknown: "未知平台",
 };
 
 function detectPlatform(url: string): Platform | null {
   if (!url.trim()) return null;
-  if (/youtube\.com|youtu\.be/i.test(url)) return "youtube";
-  if (/douyin\.com/i.test(url)) return "douyin";
-  if (/xiaohongshu\.com|xhslink\.com/i.test(url)) return "xiaohongshu";
-  if (/kuaishou\.com/i.test(url)) return "kuaishou";
   if (/twitter\.com|x\.com/i.test(url)) return "twitter";
   return "unknown";
 }
@@ -447,13 +422,9 @@ export default function Home() {
           <h2 className="text-xs font-medium uppercase tracking-widest text-zinc-600 text-center mb-6">
             支持平台
           </h2>
-          <div className="grid grid-cols-3 sm:grid-cols-5 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 max-w-xs mx-auto">
             {(
               [
-                ["youtube", "YouTube", PlaySquare, "text-red-400"],
-                ["douyin", "抖音", Music2, "text-pink-400"],
-                ["xiaohongshu", "小红书", MessageCircle, "text-red-300"],
-                ["kuaishou", "快手", Film, "text-yellow-400"],
                 ["twitter", "X (Twitter)", MessageSquare, "text-sky-400"],
               ] as const
             ).map(([id, label, Icon, color]) => (
