@@ -1,10 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 
+export const runtime = "edge";
+
 export async function GET(req: NextRequest) {
   const url = req.nextUrl.searchParams.get("url");
-  if (!url) {
+  if (!url)
     return NextResponse.json({ error: "url is required" }, { status: 400 });
-  }
 
   try {
     const resp = await fetch(url, {
@@ -30,7 +31,7 @@ export async function GET(req: NextRequest) {
         "Content-Type": contentType,
         "Content-Length": contentLength ?? "",
         "Access-Control-Allow-Origin": "*",
-        "Cache-Control": "no-cache",
+        "Cache-Control": "public, max-age=3600",
       },
     });
   } catch (e: any) {
