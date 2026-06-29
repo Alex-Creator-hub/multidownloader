@@ -32,7 +32,8 @@ type Status = "idle" | "parsing" | "success" | "error";
 /* ─── per-card download state ─── */
 interface DownloadState {
   status: "idle" | "downloading" | "done" | "error" | "paused";
-  progress: number; // 0–100
+  progress: number;
+  totalBytes?: number;
 }
 
 /* ─── platforms ─── */
@@ -60,13 +61,6 @@ function detectPlatform(url: string): Platform | null {
 }
 
 /* ─── helpers ─── */
-function qualityRank(q: string): number {
-  if (q.includes("4K")) return 2160;
-  if (q.includes("2K")) return 1440;
-  const n = parseInt(q, 10);
-  return isNaN(n) ? 0 : n;
-}
-
 /** Extract the first valid http/https URL from arbitrary text */
 function extractUrl(text: string): string {
   const m = text.match(/https?:\/\/[^\s，。、,]+/);
@@ -174,33 +168,37 @@ export default function Home() {
       }
 
       const st = dlStates[idx];
-      const startByte = st?.status === "paused" ? Math.round((st.progress / 100) * 1024 * 1024) : 0;
+      const startByte = st?.status === "paused" ? st.totalBytes ?? 0 : 0;
 
       setDlStates((prev) => {
         const next = [...prev];
-        next[idx] = { status: "downloading", progress: prev[idx]?.progress || 0 };
+        next[idx] = { status: "downloading", progress: prev[idx]?.progress || 0, totalBytes: prev[idx]?.totalBytes ?? 0 };
         return next;
       });
 
       const xhr = new XMLHttpRequest();
       xhrRefs.current.set(idx, xhr);
 
-      xhr.open("GET", fmt.url);
+      const proxyUrl = `/api/download?url=${encodeURIComponent(fmt.url)}`;
+      xhr.open("GET", proxyUrl);
       if (startByte > 0) {
         xhr.setRequestHeader("Range", `bytes=${startByte}-`);
       }
       xhr.responseType = "blob";
 
-      let lastProgress = startByte > 0 ? st.progress : 0;
+      let lastProgress = st?.progress || 0;
 
       xhr.onprogress = (e) => {
         if (e.lengthComputable) {
-          const totalSize = startByte > 0 ? e.total + startByte : e.total;
-          const pct = Math.round(((startByte + e.loaded) / totalSize) * 100);
+          const totalSize = e.total + startByte;
+          const downloaded = e.loaded + startByte;
+          const pct = Math.round((downloaded / totalSize) * 100);
           lastProgress = pct;
           setDlStates((prev) => {
             const next = [...prev];
-            if (next[idx]?.status === "downloading") next[idx].progress = pct;
+            if (next[idx]?.status === "downloading") {
+              next[idx] = { ...next[idx], progress: pct, totalBytes: totalSize };
+            }
             return next;
           });
         }
@@ -260,8 +258,6 @@ export default function Home() {
   }, [mediaList, dlStates, downloadSingle]);
 
   /* ── helpers ── */
-  const hasDownloads =
-    dlStates.some((s) => s.status === "downloading" || s.status === "done");
   const allDone = dlStates.every((s) => s.status === "done");
 
   const PlatformIcon = detected ? platformIcons[detected] : null;
