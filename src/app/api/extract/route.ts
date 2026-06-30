@@ -53,16 +53,16 @@ function buildMedia(legacy: any, text: string): Media[] {
 async function getBearerToken(): Promise<string | null> {
   if (cachedBearerToken) return cachedBearerToken;
   try {
+    // Method 1: Search homepage HTML
     const res = await fetch("https://x.com/", {
       headers: { "User-Agent": UA, "Accept-Language": "en-US,en;q=0.9" },
     });
     const html = await res.text();
 
-    // Look for the AAAA… bearer pattern directly
     let match = html.match(/AAAAA[0-9A-Za-z_%\-]{50,200}/);
     if (match) { cachedBearerToken = match[0]; return cachedBearerToken; }
 
-    // Search JS bundles referenced from the page
+    // Method 2: Search JS bundles referenced from homepage
     const jsUrls = [...html.matchAll(/https:\/\/abs\.twimg\.com\/[^"'\s]*\.js/g)].map(m => m[0]);
     for (const jsUrl of jsUrls.slice(0, 5)) {
       try {
@@ -72,6 +72,18 @@ async function getBearerToken(): Promise<string | null> {
         if (match) { cachedBearerToken = match[0]; return cachedBearerToken; }
       } catch { /* continue */ }
     }
+
+    // Method 3: Fetch a known main JS entry point
+    try {
+      const mainJsRes = await fetch("https://abs.twimg.com/responsive-web/client-web/main.27c32d67.js", {
+        headers: { "User-Agent": UA },
+      });
+      if (mainJsRes.ok) {
+        const js = await mainJsRes.text();
+        match = js.match(/AAAAA[0-9A-Za-z_%\-]{50,200}/);
+        if (match) { cachedBearerToken = match[0]; return cachedBearerToken; }
+      }
+    } catch { /* ignore */ }
   } catch { /* ignore */ }
   return null;
 }
