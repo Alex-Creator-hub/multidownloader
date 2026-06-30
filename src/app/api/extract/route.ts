@@ -16,22 +16,21 @@ function labelForBitrate(bps: number | undefined): string {
   return "流畅 360p";
 }
 
-function parseMedia(legacy: any, text: string): Media[] | null {
+function buildMedia(legacy: any, text: string): Media[] {
   const rawMedia: any[] = legacy?.extended_entities?.media || [];
-  if (!rawMedia.length) return null;
-
   return rawMedia.map((m: any) => {
     if (m.type === "video" || m.type === "animated_gif") {
       const variants = (m.video_info?.variants || [])
         .filter((v: any) => v.bitrate && v.content_type === "video/mp4")
         .sort((a: any, b: any) => (b.bitrate || 0) - (a.bitrate || 0));
-      const bestVariant = variants[0];
-      const url = bestVariant?.url || variants[variants.length - 1]?.url || "";
       return {
         type: "video" as const,
         title: text,
         previewUrl: m.media_url_https || "",
-        formats: [{ quality: labelForBitrate(bestVariant?.bitrate), url }],
+        formats: variants.map((v: any) => ({
+          quality: labelForBitrate(v.bitrate),
+          url: v.url,
+        })),
       };
     }
     return {
@@ -43,76 +42,50 @@ function parseMedia(legacy: any, text: string): Media[] | null {
   });
 }
 
-// Extract tweet from $_TSR dehydrated relay data
-function extractFromTSR(html: string): Media[] | null {
-  // Find the $_TSR.router initialization script
-  const tsrMatch = html.match(/\$_\w+\.router\s*=\s*\(\$R\s*=>\s*\$R\[\d+\]\s*=\s*(\{[\s\S]*?\})\s*\)\(/);
-  if (!tsrMatch) return null;
-
-  try {
-    // Extract relayRecords from the dehydrated data
-    // The format uses $R[N]={...} assignments with circular refs
-    // We need to find all the legacy tweet data objects
-    const scriptContent = tsrMatch[0];
-
-    // Find legacy tweet data: "client:<tweetId>:legacy":{__id:"...",__typename:"LegacyTweet",...full_text:"...",...extended_entities:...}
-    // The pattern: __typename":"LegacyTweet" followed by the fields
-    const legacyPattern = /"LegacyTweet"[\s\S]*?"full_text"\s*:\s*"((?:[^"\\]|\\.)*)"[\s\S]*?"extended_entities"\s*:\s*(\{[^}]*"media"\s*:\s*\[[\s\S]*?\]\s*\})/g;
-    const matches = [...scriptContent.matchAll(legacyPattern)];
-
-    if (matches.length === 0) return null;
-
-    const allMedia: Media[] = [];
-    for (const m of matches) {
-      const fullText = JSON.parse(`"${m[1]}"`);
-      const text = fullText.slice(0, 60) || "X 媒体";
-
-      // Parse the extended_entities JSON
-      let entitiesStr = m[2];
-      // Balance braces for the JSON object
-      let depth = 0;
-      let end = 0;
-      for (let i = 0; i < entitiesStr.length; i++) {
-        if (entitiesStr[i] === "{") depth++;
-        else if (entitiesStr[i] === "}") { depth--; if (depth === 0) { end = i + 1; break; } }
-      }
-      if (end === 0) continue;
-      entitiesStr = entitiesStr.slice(0, end);
-
-      const entities = JSON.parse(entitiesStr);
-      const rawMedia: any[] = entities?.media || [];
-      if (!rawMedia.length) continue;
-
-      for (const rm of rawMedia) {
-        if (rm.type === "video" || rm.type === "animated_gif") {
-          const variants = (rm.video_info?.variants || [])
-            .filter((v: any) => v.bitrate && v.content_type === "video/mp4")
-            .sort((a: any, b: any) => (b.bitrate || 0) - (a.bitrate || 0));
-          const best = variants[0];
-          const url = best?.url || variants[variants.length - 1]?.url || "";
-          allMedia.push({
-            type: "video" as const,
-            title: text,
-            previewUrl: rm.media_url_https || "",
-            formats: [{ quality: labelForBitrate(best?.bitrate), url }],
-          });
-        } else {
-          allMedia.push({
-            type: "image" as const,
-            title: text,
-            previewUrl: rm.media_url_https || "",
-            formats: [{ quality: "原图", url: rm.media_url_https + "?name=orig" }],
-          });
-        }
-      }
+// Extract a balanced JSON object starting from a known position in a string
+function extractBalancedJson(str: string, startPos: number): string | null {
+  if (str[startPos] !== "{") return null;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = startPos; i < str.length; i++) {
+    const ch = str[i];
+    if (escaped) { escaped = false; continue; }
+    if (ch === "\\" && inString) { escaped = true; continue; }
+    if (ch === '"' && !escaped) { inString = !inString; continue; }
+    if (inString) continue;
+    if (ch === "{") depth++;
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0) return str.slice(startPos, i + 1);
     }
-    return allMedia.length > 0 ? allMedia : null;
-  } catch {
-    return null;
   }
+  return null;
 }
 
-// Try traditional __NEXT_DATA__ extraction (for older pages)
+// Find all LegacyTweet objects in the dehydrated Relay data
+function findLegacyTweetObjects(html: string): any[] {
+  const results: any[] = [];
+  // Look for the LegacyTweet typename marker
+  let searchPos = 0;
+  while (true) {
+    const idx = html.indexOf('__typename":"LegacyTweet"', searchPos);
+    if (idx === -1) break;
+    // Find the opening brace before this marker
+    const before = html.lastIndexOf("{", idx - 50);
+    if (before === -1) { searchPos = idx + 1; continue; }
+    searchPos = idx + 1;
+    const jsonStr = extractBalancedJson(html, before);
+    if (!jsonStr) continue;
+    try {
+      const obj = JSON.parse(jsonStr);
+      if (obj.extended_entities) results.push(obj);
+    } catch { /* skip malformed */ }
+  }
+  return results;
+}
+
+// Extract from __NEXT_DATA__ script tag
 function extractFromNextData(html: string): Media[] | null {
   const ndMatch = html.match(/<script[^>]+id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
   if (!ndMatch) return null;
@@ -130,10 +103,25 @@ function extractFromNextData(html: string): Media[] | null {
     if (!tweet) return null;
     const legacy = tweet.legacy || {};
     const text = (legacy.full_text || "").slice(0, 60) || "X 媒体";
-    return parseMedia(legacy, text);
+    const media = buildMedia(legacy, text);
+    return media.length > 0 ? media : null;
   } catch {
     return null;
   }
+}
+
+// Extract from the dehydrated Relay record store ($_TSR)
+function extractFromTSR(html: string): Media[] | null {
+  // First, search for extended_entities anywhere in the HTML
+  if (!html.includes("extended_entities")) return null;
+
+  const legacyObjs = findLegacyTweetObjects(html);
+  const allMedia: Media[] = [];
+  for (const obj of legacyObjs) {
+    const text = (obj.full_text || "").slice(0, 60) || "X 媒体";
+    allMedia.push(...buildMedia(obj, text));
+  }
+  return allMedia.length > 0 ? allMedia : null;
 }
 
 async function tryScrape(url: string): Promise<{ media: Media[] | null; diagnostic: string }> {
@@ -149,20 +137,17 @@ async function tryScrape(url: string): Promise<{ media: Media[] | null; diagnost
   if (!res.ok) return { media: null, diagnostic: `HTTP ${res.status} from ${url}` };
 
   const html = await res.text();
-  const hasNextData = html.includes("__NEXT_DATA__");
-  const hasTSR = html.includes("$_TSR") || html.includes("router=($R");
+  const hasMedia = html.includes("extended_entities");
 
-  // Try $_TSR / Relay format (current X.com format)
-  const tsrMedia = extractFromTSR(html);
-  if (tsrMedia) return { media: tsrMedia, diagnostic: "" };
+  let media = extractFromNextData(html);
+  if (media) return { media, diagnostic: "" };
 
-  // Try __NEXT_DATA__ format (older format)
-  const ndMedia = extractFromNextData(html);
-  if (ndMedia) return { media: ndMedia, diagnostic: "" };
+  media = extractFromTSR(html);
+  if (media) return { media, diagnostic: "" };
 
   return {
     media: null,
-    diagnostic: `${url}: HTML ${html.length}B, hasNextData=${hasNextData}, hasTSR=${hasTSR}`,
+    diagnostic: `${url}: HTML ${html.length}B, hasMedia=${hasMedia}`,
   };
 }
 
@@ -179,23 +164,17 @@ export async function POST(req: NextRequest) {
 
   try {
     const diagnostics: string[] = [];
-    // Try canonical URL format first (x.com/username/status/id)
-    const canonicalUrl = `https://x.com/${username}/status/${tweetId}`;
-    const result = await tryScrape(canonicalUrl);
-    if (result.media && result.media.length > 0)
-      return NextResponse.json({ data: result.media });
-    diagnostics.push(result.diagnostic);
-
-    // Fallback: try /i/status paths
-    const fallbackUrls = [
+    const urls = [
+      `https://x.com/${username}/status/${tweetId}`,
       `https://x.com/i/status/${tweetId}`,
       `https://twitter.com/i/status/${tweetId}`,
     ];
-    for (const u of fallbackUrls) {
-      const r = await tryScrape(u);
-      if (r.media && r.media.length > 0)
-        return NextResponse.json({ data: r.media });
-      diagnostics.push(r.diagnostic);
+
+    for (const u of urls) {
+      const result = await tryScrape(u);
+      if (result.media && result.media.length > 0)
+        return NextResponse.json({ data: result.media });
+      diagnostics.push(result.diagnostic);
     }
 
     return NextResponse.json(
