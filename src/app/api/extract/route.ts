@@ -26,17 +26,37 @@ function labelForBitrate(bps: number | undefined): string {
 
 async function getBearerToken(): Promise<string | null> {
   if (cachedBearerToken) return cachedBearerToken;
-  // Extract the Bearer token from x.com's homepage JS — it's a public client token
   try {
+    // Fetch x.com homepage and look for the Bearer token in main JS chunks
     const res = await fetch("https://x.com/", {
       headers: { "User-Agent": UA, "Accept-Language": "en-US,en;q=0.9" },
     });
     const html = await res.text();
-    // Twitter's public Bearer token appears in main JS bundles
-    const match = html.match(/AAAAA[0-9A-Za-z_%\-]{50,200}/);
-    if (match) {
-      cachedBearerToken = match[0];
-      return cachedBearerToken;
+
+    // Pattern 1: Direct Bearer token in HTML/JS
+    let match = html.match(/AAAAA[0-9A-Za-z_%\-]{50,200}/);
+    if (match) { cachedBearerToken = match[0]; return cachedBearerToken; }
+
+    // Pattern 2: Find main JS chunks and extract bearer from them
+    const jsUrls = html.match(/https:\/\/abs\.twimg\.com\/[^"'\s]*main[^"'\s]*\.js/g) || [];
+    for (const jsUrl of jsUrls.slice(0, 3)) {
+      try {
+        const jsRes = await fetch(jsUrl, { headers: { "User-Agent": UA } });
+        const js = await jsRes.text();
+        match = js.match(/AAAAA[0-9A-Za-z_%\-]{50,200}/);
+        if (match) { cachedBearerToken = match[0]; return cachedBearerToken; }
+      } catch { /* continue */ }
+    }
+
+    // Pattern 3: Try common JS bundle paths
+    const altUrls = html.match(/https:\/\/abs\.twimg\.com\/[^"'\s]*\.js/g) || [];
+    for (const jsUrl of altUrls.slice(0, 8)) {
+      try {
+        const jsRes = await fetch(jsUrl, { headers: { "User-Agent": UA } });
+        const js = await jsRes.text();
+        match = js.match(/AAAAA[0-9A-Za-z_%\-]{50,200}/);
+        if (match) { cachedBearerToken = match[0]; return cachedBearerToken; }
+      } catch { /* continue */ }
     }
   } catch { /* ignore */ }
   return null;
