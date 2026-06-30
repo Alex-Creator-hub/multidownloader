@@ -8,11 +8,8 @@ interface Media { type: "video" | "image"; title: string; previewUrl: string; fo
 const UA =
   "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36";
 
-const QUERY_ID = "0hWvDhmW8YQ-S_ib3AZIrQ";
-
 let cachedGuestToken: string | null = null;
 let cachedGuestTokenExpiry = 0;
-let cachedBearerToken: string | null = null;
 
 function labelForBitrate(bps: number | undefined): string {
   if (!bps) return "原画";
@@ -48,55 +45,16 @@ function buildMedia(legacy: any, text: string): Media[] {
   });
 }
 
-// ── Bearer token extraction from x.com homepage JS ──
-
-async function getBearerToken(): Promise<string | null> {
-  if (cachedBearerToken) return cachedBearerToken;
-  try {
-    // Method 1: Search homepage HTML
-    const res = await fetch("https://x.com/", {
-      headers: { "User-Agent": UA, "Accept-Language": "en-US,en;q=0.9" },
-    });
-    const html = await res.text();
-
-    let match = html.match(/AAAAA[0-9A-Za-z_%\-]{50,200}/);
-    if (match) { cachedBearerToken = match[0]; return cachedBearerToken; }
-
-    // Method 2: Search JS bundles referenced from homepage
-    const jsUrls = [...html.matchAll(/https:\/\/abs\.twimg\.com\/[^"'\s]*\.js/g)].map(m => m[0]);
-    for (const jsUrl of jsUrls.slice(0, 5)) {
-      try {
-        const jsRes = await fetch(jsUrl, { headers: { "User-Agent": UA } });
-        const js = await jsRes.text();
-        match = js.match(/AAAAA[0-9A-Za-z_%\-]{50,200}/);
-        if (match) { cachedBearerToken = match[0]; return cachedBearerToken; }
-      } catch { /* continue */ }
-    }
-
-    // Method 3: Fetch a known main JS entry point
-    try {
-      const mainJsRes = await fetch("https://abs.twimg.com/responsive-web/client-web/main.27c32d67.js", {
-        headers: { "User-Agent": UA },
-      });
-      if (mainJsRes.ok) {
-        const js = await mainJsRes.text();
-        match = js.match(/AAAAA[0-9A-Za-z_%\-]{50,200}/);
-        if (match) { cachedBearerToken = match[0]; return cachedBearerToken; }
-      }
-    } catch { /* ignore */ }
-  } catch { /* ignore */ }
-  return null;
-}
-
-// ── Guest token ──
-
-async function getGuestToken(bearer: string): Promise<string | null> {
+async function getGuestToken(): Promise<string | null> {
   const now = Date.now();
   if (cachedGuestToken && now < cachedGuestTokenExpiry) return cachedGuestToken;
   try {
     const res = await fetch("https://api.twitter.com/1.1/guest/activate.json", {
       method: "POST",
-      headers: { Authorization: `Bearer ${bearer}`, "User-Agent": UA },
+      headers: {
+        Authorization: "Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA",
+        "User-Agent": UA,
+      },
     });
     if (!res.ok) return null;
     const data = await res.json() as { guest_token?: string };
@@ -109,10 +67,8 @@ async function getGuestToken(bearer: string): Promise<string | null> {
   return null;
 }
 
-// ── GraphQL query ──
-
 async function fetchTweetGraphQL(
-  tweetId: string, bearer: string, guestToken: string,
+  tweetId: string, guestToken: string,
 ): Promise<Media[] | null> {
   const variables = encodeURIComponent(JSON.stringify({
     focalTweetId: tweetId,
@@ -147,11 +103,11 @@ async function fetchTweetGraphQL(
   }));
   const fieldToggles = encodeURIComponent(JSON.stringify({ withArticleRichContentState: false }));
 
-  const url = `https://twitter.com/i/api/graphql/${QUERY_ID}/TweetDetail?variables=${variables}&features=${features}&fieldToggles=${fieldToggles}`;
+  const url = `https://twitter.com/i/api/graphql/0hWvDhmW8YQ-S_ib3AZIrQ/TweetDetail?variables=${variables}&features=${features}&fieldToggles=${fieldToggles}`;
 
   const res = await fetch(url, {
     headers: {
-      Authorization: `Bearer ${bearer}`,
+      Authorization: "Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA",
       "X-Guest-Token": guestToken,
       "User-Agent": UA,
       "Accept-Language": "en-US,en;q=0.9",
@@ -159,10 +115,7 @@ async function fetchTweetGraphQL(
   });
   if (!res.ok) return null;
 
-  return parseGraphQLTweet(await res.json());
-}
-
-function parseGraphQLTweet(data: any): Media[] | null {
+  const data = await res.json() as any;
   const instructions = data?.data?.threaded_conversation_with_injections_v2?.instructions || [];
   let tweet: any = null;
   for (const instr of instructions) {
@@ -182,75 +135,6 @@ function parseGraphQLTweet(data: any): Media[] | null {
   return media.length > 0 ? media : null;
 }
 
-// ── Page scraping fallback ──
-
-function extractBalancedJson(str: string, startPos: number): string | null {
-  if (str[startPos] !== "{") return null;
-  let depth = 0, inString = false, escaped = false;
-  for (let i = startPos; i < str.length; i++) {
-    const ch = str[i];
-    if (escaped) { escaped = false; continue; }
-    if (ch === "\\" && inString) { escaped = true; continue; }
-    if (ch === '"' && !escaped) { inString = !inString; continue; }
-    if (inString) continue;
-    if (ch === "{") depth++;
-    else if (ch === "}") { depth--; if (depth === 0) return str.slice(startPos, i + 1); }
-  }
-  return null;
-}
-
-function extractFromPage(html: string): Media[] | null {
-  // __NEXT_DATA__ (legacy format)
-  const ndMatch = html.match(/<script[^>]+id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
-  if (ndMatch) {
-    try {
-      const data = JSON.parse(ndMatch[1]);
-      let tweet: any = null;
-      const tr = data?.props?.pageProps?.tweetResult;
-      if (tr?.__typename === "Tweet") tweet = tr;
-      if (!tweet) {
-        for (const entry of data?.props?.pageProps?.conversationThread?.instructions?.[0]?.entries || []) {
-          const r = entry?.content?.itemContent?.tweet_results?.result;
-          if (r?.__typename === "Tweet") { tweet = r; break; }
-        }
-      }
-      if (tweet) {
-        const legacy = tweet.legacy || {};
-        const text = (legacy.full_text || "").slice(0, 60) || "X 媒体";
-        const media = buildMedia(legacy, text);
-        if (media.length > 0) return media;
-      }
-    } catch { /* skip */ }
-  }
-
-  // TSR / Relay dehydrated format
-  if (html.includes("extended_entities")) {
-    const results: any[] = [];
-    let searchPos = 0;
-    while (true) {
-      const idx = html.indexOf('__typename":"LegacyTweet"', searchPos);
-      if (idx === -1) break;
-      const before = html.lastIndexOf("{", Math.max(0, idx - 50));
-      searchPos = idx + 1;
-      if (before === -1) continue;
-      const jsonStr = extractBalancedJson(html, before);
-      if (!jsonStr) continue;
-      try {
-        const obj = JSON.parse(jsonStr);
-        if (obj.extended_entities) results.push(obj);
-      } catch { /* skip */ }
-    }
-    const all: Media[] = [];
-    for (const obj of results) {
-      const text = (obj.full_text || "").slice(0, 60) || "X 媒体";
-      all.push(...buildMedia(obj, text));
-    }
-    if (all.length > 0) return all;
-  }
-
-  return null;
-}
-
 async function scrapePage(url: string): Promise<{ media: Media[] | null; status: number }> {
   const res = await fetch(url, {
     headers: {
@@ -262,10 +146,72 @@ async function scrapePage(url: string): Promise<{ media: Media[] | null; status:
   });
   if (!res.ok) return { media: null, status: res.status };
   const html = await res.text();
-  return { media: extractFromPage(html), status: 200 };
+
+  // Try __NEXT_DATA__
+  const ndMatch = html.match(/<script[^>]+id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
+  if (ndMatch) {
+    try {
+      const d = JSON.parse(ndMatch[1]);
+      let tweet: any = null;
+      const tr = d?.props?.pageProps?.tweetResult;
+      if (tr?.__typename === "Tweet") tweet = tr;
+      if (!tweet) {
+        for (const e of d?.props?.pageProps?.conversationThread?.instructions?.[0]?.entries || []) {
+          const r = e?.content?.itemContent?.tweet_results?.result;
+          if (r?.__typename === "Tweet") { tweet = r; break; }
+        }
+      }
+      if (tweet) {
+        const l = tweet.legacy || {};
+        const t = (l.full_text || "").slice(0, 60) || "X 媒体";
+        const m = buildMedia(l, t);
+        if (m.length > 0) return { media: m, status: 200 };
+      }
+    } catch { /* skip */ }
+  }
+
+  // Try TSR/Relay dehydrated format
+  if (html.includes("extended_entities")) {
+    const results: any[] = [];
+    let pos = 0;
+    while (true) {
+      const idx = html.indexOf('__typename":"LegacyTweet"', pos);
+      if (idx === -1) break;
+      const before = html.lastIndexOf("{", Math.max(0, idx - 50));
+      pos = idx + 1;
+      if (before === -1) continue;
+      const json = extractJson(html, before);
+      if (!json) continue;
+      try {
+        const obj = JSON.parse(json);
+        if (obj.extended_entities) results.push(obj);
+      } catch { /* skip */ }
+    }
+    const all: Media[] = [];
+    for (const obj of results) {
+      const t = (obj.full_text || "").slice(0, 60) || "X 媒体";
+      all.push(...buildMedia(obj, t));
+    }
+    if (all.length > 0) return { media: all, status: 200 };
+  }
+
+  return { media: null, status: 200 };
 }
 
-// ── Main handler ──
+function extractJson(str: string, start: number): string | null {
+  if (str[start] !== "{") return null;
+  let depth = 0, inStr = false, esc = false;
+  for (let i = start; i < str.length; i++) {
+    const c = str[i];
+    if (esc) { esc = false; continue; }
+    if (c === "\\" && inStr) { esc = true; continue; }
+    if (c === '"' && !esc) { inStr = !inStr; continue; }
+    if (inStr) continue;
+    if (c === "{") depth++;
+    else if (c === "}") { depth--; if (depth === 0) return str.slice(start, i + 1); }
+  }
+  return null;
+}
 
 export async function POST(req: NextRequest) {
   const { url } = await req.json();
@@ -273,42 +219,27 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "请输入链接" }, { status: 400 });
 
   const m = url.match(/(?:twitter\.com|x\.com)\/(\w+)\/status\/(\d+)/i);
-  if (!m)
-    return NextResponse.json({ error: "无法识别 X/Twitter 链接" }, { status: 400 });
+  if (!m) return NextResponse.json({ error: "无法识别 X/Twitter 链接" }, { status: 400 });
 
   const [, username, tweetId] = m;
 
   try {
-    const diagnostics: string[] = [];
-
     // Method 1: Guest token + GraphQL
-    const bearer = await getBearerToken();
-    if (bearer) {
-      const guestToken = await getGuestToken(bearer);
-      if (guestToken) {
-        const media = await fetchTweetGraphQL(tweetId, bearer, guestToken);
-        if (media && media.length > 0) return NextResponse.json({ data: media });
-        diagnostics.push("graphql: " + (media ? "no-media" : "null"));
-      } else {
-        diagnostics.push("graphql: no-guest-token");
-      }
-    } else {
-      diagnostics.push("graphql: no-bearer");
+    const guestToken = await getGuestToken();
+    if (guestToken) {
+      const media = await fetchTweetGraphQL(tweetId, guestToken);
+      if (media && media.length > 0) return NextResponse.json({ data: media });
     }
 
     // Method 2: Page scraping
-    const pageResult = await scrapePage(`https://x.com/${username}/status/${tweetId}`);
-    if (pageResult.media && pageResult.media.length > 0)
-      return NextResponse.json({ data: pageResult.media });
+    const r1 = await scrapePage(`https://x.com/${username}/status/${tweetId}`);
+    if (r1.media && r1.media.length > 0) return NextResponse.json({ data: r1.media });
 
-    const iResult = await scrapePage(`https://x.com/i/status/${tweetId}`);
-    if (iResult.media && iResult.media.length > 0)
-      return NextResponse.json({ data: iResult.media });
-
-    diagnostics.push(`page: HTTP ${pageResult.status}`, `i_page: HTTP ${iResult.status}`);
+    const r2 = await scrapePage(`https://x.com/i/status/${tweetId}`);
+    if (r2.media && r2.media.length > 0) return NextResponse.json({ data: r2.media });
 
     return NextResponse.json(
-      { error: "该推文中没有检测到视频或图片，推文可能不存在或为私密账号", diagnostics },
+      { error: "该推文中没有检测到视频或图片，推文可能不存在或为私密账号" },
       { status: 400 },
     );
   } catch (e: any) {
