@@ -19,15 +19,15 @@ async function scrapeTweetPage(tweetId: string): Promise<Media[] | null> {
   const res = await fetch(url, {
     headers: {
       "User-Agent": UA,
-      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
       "Accept-Language": "en-US,en;q=0.5",
     },
+    redirect: "follow",
   });
 
   if (!res.ok) return null;
   const html = await res.text();
 
-  // Extract __NEXT_DATA__ JSON from the page
   const ndMatch = html.match(/<script[^>]+id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
   if (!ndMatch) return null;
 
@@ -35,23 +35,16 @@ async function scrapeTweetPage(tweetId: string): Promise<Media[] | null> {
     const data = JSON.parse(ndMatch[1]);
     const pageProps = data?.props?.pageProps;
 
-    // The tweet data can be in different paths
     let tweet: any = null;
-
-    // Path 1: direct tweetResult
     const tweetResult = pageProps?.tweetResult;
-    if (tweetResult?.__typename === "Tweet") {
-      tweet = tweetResult;
-    }
+    if (tweetResult?.__typename === "Tweet") tweet = tweetResult;
 
-    // Path 2: threaded conversation
-    const entries = pageProps?.conversationThread?.instructions?.[0]?.entries;
-    if (entries && !tweet) {
-      for (const entry of entries) {
-        const r = entry?.content?.itemContent?.tweet_results?.result;
-        if (r?.__typename === "Tweet") {
-          tweet = r;
-          break;
+    if (!tweet) {
+      const entries = pageProps?.conversationThread?.instructions?.[0]?.entries;
+      if (entries) {
+        for (const entry of entries) {
+          const r = entry?.content?.itemContent?.tweet_results?.result;
+          if (r?.__typename === "Tweet") { tweet = r; break; }
         }
       }
     }
@@ -100,10 +93,8 @@ export async function POST(req: NextRequest) {
   if (!m)
     return NextResponse.json({ error: "无法识别 X/Twitter 链接" }, { status: 400 });
 
-  const tweetId = m[1];
-
   try {
-    const mediaList = await scrapeTweetPage(tweetId);
+    const mediaList = await scrapeTweetPage(m[1]);
 
     if (!mediaList || mediaList.length === 0) {
       return NextResponse.json(
