@@ -9,6 +9,7 @@ node_bundler = "esbuild"
 [[plugins]]
 origin = "default"
 package = "@netlify/plugin-nextjs"
+pinned_version = "5"
 
 [plugins.inputs]
 
@@ -16,9 +17,10 @@ package = "@netlify/plugin-nextjs"
 publish = "C:\\Users\\liuhang.216\\vscode_liuhang\\multidownloader\\.next"
 publishOrigin = "config"
 commandOrigin = "config"
-command = "next build"
+command = "npm run build"
 
 [build.environment]
+NODE_VERSION = "20"
 
 [build.processing]
 
