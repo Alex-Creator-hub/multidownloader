@@ -299,15 +299,26 @@ export async function POST(req: NextRequest) {
   const [, username, tweetId] = m;
 
   try {
+    const diagnostics: string[] = [];
+
     // Method 1: Guest token + GraphQL API (most reliable)
-    const bearer = await getBearerToken();
+    // TWITTER_BEARER_TOKEN is a public client token — same one x.com ships to every browser
+    let bearer = process.env.TWITTER_BEARER_TOKEN || null;
+    if (!bearer) {
+      bearer = await getBearerToken();
+    }
     if (bearer) {
       const guestToken = await getGuestToken(bearer);
       if (guestToken) {
         const media = await fetchTweetGraphQL(tweetId, bearer, guestToken);
         if (media && media.length > 0)
           return NextResponse.json({ data: media });
+        diagnostics.push("graphql: " + (media ? "no-media" : "null"));
+      } else {
+        diagnostics.push("graphql: no-guest-token");
       }
+    } else {
+      diagnostics.push("graphql: no-bearer-token");
     }
 
     // Method 2: Page scraping fallback
@@ -320,10 +331,13 @@ export async function POST(req: NextRequest) {
     if (iResult.media && iResult.media.length > 0)
       return NextResponse.json({ data: iResult.media });
 
+    diagnostics.push(`canonical: HTTP ${pageResult.status}`);
+    diagnostics.push(`i_status: HTTP ${iResult.status}`);
+
     return NextResponse.json(
       {
         error: "该推文中没有检测到视频或图片，推文可能不存在或为私密账号",
-        diagnostics: [`canonical: HTTP ${pageResult.status}`, `i_status: HTTP ${iResult.status}`],
+        diagnostics,
       },
       { status: 400 },
     );
