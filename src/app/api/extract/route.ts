@@ -64,7 +64,7 @@ function parseMedia(legacy: any, text: string): Media[] | null {
   });
 }
 
-async function tryScrape(url: string): Promise<Media[] | null> {
+async function tryScrape(url: string): Promise<{ media: Media[] | null; diagnostic: string }> {
   const res = await fetch(url, {
     headers: {
       "User-Agent": UA,
@@ -74,9 +74,11 @@ async function tryScrape(url: string): Promise<Media[] | null> {
     redirect: "follow",
   });
 
-  if (!res.ok) return null;
+  if (!res.ok) return { media: null, diagnostic: `HTTP ${res.status} from ${url}` };
 
   const html = await res.text();
+  const htmlLen = html.length;
+  const hasNextData = html.includes("__NEXT_DATA__");
 
   // Try __NEXT_DATA__ extraction
   const ndMatch = html.match(/<script[^>]+id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
@@ -88,14 +90,15 @@ async function tryScrape(url: string): Promise<Media[] | null> {
         const legacy = tweet.legacy || {};
         const text = (legacy.full_text || "").slice(0, 60) || "X 媒体";
         const media = parseMedia(legacy, text);
-        if (media) return media;
+        if (media) return { media, diagnostic: "" };
       }
-    } catch {
-      // Continue to next method
+      return { media: null, diagnostic: `${url}: __NEXT_DATA__ found, no tweet in it` };
+    } catch (e: any) {
+      return { media: null, diagnostic: `${url}: JSON parse error: ${e.message}` };
     }
   }
 
-  return null;
+  return { media: null, diagnostic: `${url}: HTML ${htmlLen}B, hasNextData=${hasNextData}` };
 }
 
 export async function POST(req: NextRequest) {
@@ -110,7 +113,7 @@ export async function POST(req: NextRequest) {
   const tweetId = m[1];
 
   try {
-    // Try multiple URL formats — x.com mobile, twitter.com mobile, and the /i/status page
+    const diagnostics: string[] = [];
     const urls = [
       `https://x.com/i/status/${tweetId}`,
       `https://mobile.twitter.com/i/status/${tweetId}`,
@@ -118,13 +121,14 @@ export async function POST(req: NextRequest) {
     ];
 
     for (const u of urls) {
-      const media = await tryScrape(u);
-      if (media && media.length > 0)
-        return NextResponse.json({ data: media });
+      const result = await tryScrape(u);
+      if (result.media && result.media.length > 0)
+        return NextResponse.json({ data: result.media });
+      diagnostics.push(result.diagnostic);
     }
 
     return NextResponse.json(
-      { error: "该推文中没有检测到视频或图片，推文可能不存在或为私密账号" },
+      { error: "该推文中没有检测到视频或图片，推文可能不存在或为私密账号", diagnostics },
       { status: 400 },
     );
   } catch (e: any) {
