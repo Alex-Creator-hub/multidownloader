@@ -4,7 +4,7 @@ interface Format { quality: string; url: string }
 interface Media { type: "video" | "image"; title: string; previewUrl: string; formats: Format[] }
 
 const UA =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+  "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36";
 
 function labelForBitrate(bps: number | undefined): string {
   if (!bps) return "原画";
@@ -25,15 +25,21 @@ async function scrapeTweetPage(tweetId: string): Promise<Media[] | null> {
     redirect: "follow",
   });
 
-  if (!res.ok) return null;
   const html = await res.text();
 
+  // Diagnostic: log first 500 chars
+  console.log("FETCH status:", res.status, "url:", res.url, "html preview:", html.slice(0, 500));
+
   const ndMatch = html.match(/<script[^>]+id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
-  if (!ndMatch) return null;
+  if (!ndMatch) {
+    console.log("__NEXT_DATA__ not found in HTML");
+    return null;
+  }
 
   try {
     const data = JSON.parse(ndMatch[1]);
     const pageProps = data?.props?.pageProps;
+    console.log("pageProps keys:", Object.keys(pageProps || {}));
 
     let tweet: any = null;
     const tweetResult = pageProps?.tweetResult;
@@ -42,18 +48,24 @@ async function scrapeTweetPage(tweetId: string): Promise<Media[] | null> {
     if (!tweet) {
       const entries = pageProps?.conversationThread?.instructions?.[0]?.entries;
       if (entries) {
+        console.log("entries count:", entries.length);
         for (const entry of entries) {
           const r = entry?.content?.itemContent?.tweet_results?.result;
+          console.log("entry result __typename:", r?.__typename);
           if (r?.__typename === "Tweet") { tweet = r; break; }
         }
       }
     }
 
-    if (!tweet) return null;
+    if (!tweet) {
+      console.log("No tweet found in NextData");
+      return null;
+    }
 
     const legacy = tweet.legacy || {};
     const text = (legacy.full_text || "").slice(0, 60) || "X 媒体";
     const rawMedia: any[] = legacy.extended_entities?.media || [];
+    console.log("media count:", rawMedia.length);
 
     if (!rawMedia.length) return null;
 
@@ -79,7 +91,8 @@ async function scrapeTweetPage(tweetId: string): Promise<Media[] | null> {
         formats: [{ quality: "原图", url: m.media_url_https + "?name=orig" }],
       };
     });
-  } catch {
+  } catch (e: any) {
+    console.error("Parse error:", e.message);
     return null;
   }
 }
