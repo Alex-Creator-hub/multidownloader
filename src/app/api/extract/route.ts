@@ -16,26 +16,6 @@ function labelForBitrate(bps: number | undefined): string {
   return "流畅 360p";
 }
 
-function extractTweet(data: any): any {
-  // Direct tweet result
-  const tr = data?.props?.pageProps?.tweetResult;
-  if (tr?.__typename === "Tweet") return tr;
-
-  // From conversation thread
-  for (const entry of data?.props?.pageProps?.conversationThread?.instructions?.[0]?.entries || []) {
-    const r = entry?.content?.itemContent?.tweet_results?.result;
-    if (r?.__typename === "Tweet") return r;
-  }
-
-  // From timeline entries (alternate page structure)
-  for (const entry of data?.props?.pageProps?.timeline?.instructions?.[0]?.entries || []) {
-    const r = entry?.content?.itemContent?.tweet_results?.result;
-    if (r?.__typename === "Tweet") return r;
-  }
-
-  return null;
-}
-
 function parseMedia(legacy: any, text: string): Media[] | null {
   const rawMedia: any[] = legacy?.extended_entities?.media || [];
   if (!rawMedia.length) return null;
@@ -45,14 +25,13 @@ function parseMedia(legacy: any, text: string): Media[] | null {
       const variants = (m.video_info?.variants || [])
         .filter((v: any) => v.bitrate && v.content_type === "video/mp4")
         .sort((a: any, b: any) => (b.bitrate || 0) - (a.bitrate || 0));
+      const bestVariant = variants[0];
+      const url = bestVariant?.url || variants[variants.length - 1]?.url || "";
       return {
         type: "video" as const,
         title: text,
         previewUrl: m.media_url_https || "",
-        formats: variants.map((v: any) => ({
-          quality: labelForBitrate(v.bitrate),
-          url: v.url,
-        })),
+        formats: [{ quality: labelForBitrate(bestVariant?.bitrate), url }],
       };
     }
     return {
@@ -62,6 +41,99 @@ function parseMedia(legacy: any, text: string): Media[] | null {
       formats: [{ quality: "原图", url: m.media_url_https + "?name=orig" }],
     };
   });
+}
+
+// Extract tweet from $_TSR dehydrated relay data
+function extractFromTSR(html: string): Media[] | null {
+  // Find the $_TSR.router initialization script
+  const tsrMatch = html.match(/\$_\w+\.router\s*=\s*\(\$R\s*=>\s*\$R\[\d+\]\s*=\s*(\{[\s\S]*?\})\s*\)\(/);
+  if (!tsrMatch) return null;
+
+  try {
+    // Extract relayRecords from the dehydrated data
+    // The format uses $R[N]={...} assignments with circular refs
+    // We need to find all the legacy tweet data objects
+    const scriptContent = tsrMatch[0];
+
+    // Find legacy tweet data: "client:<tweetId>:legacy":{__id:"...",__typename:"LegacyTweet",...full_text:"...",...extended_entities:...}
+    // The pattern: __typename":"LegacyTweet" followed by the fields
+    const legacyPattern = /"LegacyTweet"[\s\S]*?"full_text"\s*:\s*"((?:[^"\\]|\\.)*)"[\s\S]*?"extended_entities"\s*:\s*(\{[^}]*"media"\s*:\s*\[[\s\S]*?\]\s*\})/g;
+    const matches = [...scriptContent.matchAll(legacyPattern)];
+
+    if (matches.length === 0) return null;
+
+    const allMedia: Media[] = [];
+    for (const m of matches) {
+      const fullText = JSON.parse(`"${m[1]}"`);
+      const text = fullText.slice(0, 60) || "X 媒体";
+
+      // Parse the extended_entities JSON
+      let entitiesStr = m[2];
+      // Balance braces for the JSON object
+      let depth = 0;
+      let end = 0;
+      for (let i = 0; i < entitiesStr.length; i++) {
+        if (entitiesStr[i] === "{") depth++;
+        else if (entitiesStr[i] === "}") { depth--; if (depth === 0) { end = i + 1; break; } }
+      }
+      if (end === 0) continue;
+      entitiesStr = entitiesStr.slice(0, end);
+
+      const entities = JSON.parse(entitiesStr);
+      const rawMedia: any[] = entities?.media || [];
+      if (!rawMedia.length) continue;
+
+      for (const rm of rawMedia) {
+        if (rm.type === "video" || rm.type === "animated_gif") {
+          const variants = (rm.video_info?.variants || [])
+            .filter((v: any) => v.bitrate && v.content_type === "video/mp4")
+            .sort((a: any, b: any) => (b.bitrate || 0) - (a.bitrate || 0));
+          const best = variants[0];
+          const url = best?.url || variants[variants.length - 1]?.url || "";
+          allMedia.push({
+            type: "video" as const,
+            title: text,
+            previewUrl: rm.media_url_https || "",
+            formats: [{ quality: labelForBitrate(best?.bitrate), url }],
+          });
+        } else {
+          allMedia.push({
+            type: "image" as const,
+            title: text,
+            previewUrl: rm.media_url_https || "",
+            formats: [{ quality: "原图", url: rm.media_url_https + "?name=orig" }],
+          });
+        }
+      }
+    }
+    return allMedia.length > 0 ? allMedia : null;
+  } catch {
+    return null;
+  }
+}
+
+// Try traditional __NEXT_DATA__ extraction (for older pages)
+function extractFromNextData(html: string): Media[] | null {
+  const ndMatch = html.match(/<script[^>]+id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
+  if (!ndMatch) return null;
+  try {
+    const data = JSON.parse(ndMatch[1]);
+    let tweet: any = null;
+    const tr = data?.props?.pageProps?.tweetResult;
+    if (tr?.__typename === "Tweet") tweet = tr;
+    if (!tweet) {
+      for (const entry of data?.props?.pageProps?.conversationThread?.instructions?.[0]?.entries || []) {
+        const r = entry?.content?.itemContent?.tweet_results?.result;
+        if (r?.__typename === "Tweet") { tweet = r; break; }
+      }
+    }
+    if (!tweet) return null;
+    const legacy = tweet.legacy || {};
+    const text = (legacy.full_text || "").slice(0, 60) || "X 媒体";
+    return parseMedia(legacy, text);
+  } catch {
+    return null;
+  }
 }
 
 async function tryScrape(url: string): Promise<{ media: Media[] | null; diagnostic: string }> {
@@ -77,28 +149,21 @@ async function tryScrape(url: string): Promise<{ media: Media[] | null; diagnost
   if (!res.ok) return { media: null, diagnostic: `HTTP ${res.status} from ${url}` };
 
   const html = await res.text();
-  const htmlLen = html.length;
   const hasNextData = html.includes("__NEXT_DATA__");
+  const hasTSR = html.includes("$_TSR") || html.includes("router=($R");
 
-  // Try __NEXT_DATA__ extraction
-  const ndMatch = html.match(/<script[^>]+id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
-  if (ndMatch) {
-    try {
-      const data = JSON.parse(ndMatch[1]);
-      const tweet = extractTweet(data);
-      if (tweet) {
-        const legacy = tweet.legacy || {};
-        const text = (legacy.full_text || "").slice(0, 60) || "X 媒体";
-        const media = parseMedia(legacy, text);
-        if (media) return { media, diagnostic: "" };
-      }
-      return { media: null, diagnostic: `${url}: __NEXT_DATA__ found, no tweet in it` };
-    } catch (e: any) {
-      return { media: null, diagnostic: `${url}: JSON parse error: ${e.message}` };
-    }
-  }
+  // Try $_TSR / Relay format (current X.com format)
+  const tsrMedia = extractFromTSR(html);
+  if (tsrMedia) return { media: tsrMedia, diagnostic: "" };
 
-  return { media: null, diagnostic: `${url}: HTML ${htmlLen}B, hasNextData=${hasNextData}` };
+  // Try __NEXT_DATA__ format (older format)
+  const ndMedia = extractFromNextData(html);
+  if (ndMedia) return { media: ndMedia, diagnostic: "" };
+
+  return {
+    media: null,
+    diagnostic: `${url}: HTML ${html.length}B, hasNextData=${hasNextData}, hasTSR=${hasTSR}`,
+  };
 }
 
 export async function POST(req: NextRequest) {
@@ -106,25 +171,31 @@ export async function POST(req: NextRequest) {
   if (!url || typeof url !== "string")
     return NextResponse.json({ error: "请输入链接" }, { status: 400 });
 
-  const m = url.match(/(?:twitter\.com|x\.com)\/\w+\/status\/(\d+)/i);
+  const m = url.match(/(?:twitter\.com|x\.com)\/(\w+)\/status\/(\d+)/i);
   if (!m)
     return NextResponse.json({ error: "无法识别 X/Twitter 链接" }, { status: 400 });
 
-  const tweetId = m[1];
+  const [, username, tweetId] = m;
 
   try {
     const diagnostics: string[] = [];
-    const urls = [
+    // Try canonical URL format first (x.com/username/status/id)
+    const canonicalUrl = `https://x.com/${username}/status/${tweetId}`;
+    const result = await tryScrape(canonicalUrl);
+    if (result.media && result.media.length > 0)
+      return NextResponse.json({ data: result.media });
+    diagnostics.push(result.diagnostic);
+
+    // Fallback: try /i/status paths
+    const fallbackUrls = [
       `https://x.com/i/status/${tweetId}`,
-      `https://mobile.twitter.com/i/status/${tweetId}`,
       `https://twitter.com/i/status/${tweetId}`,
     ];
-
-    for (const u of urls) {
-      const result = await tryScrape(u);
-      if (result.media && result.media.length > 0)
-        return NextResponse.json({ data: result.media });
-      diagnostics.push(result.diagnostic);
+    for (const u of fallbackUrls) {
+      const r = await tryScrape(u);
+      if (r.media && r.media.length > 0)
+        return NextResponse.json({ data: r.media });
+      diagnostics.push(r.diagnostic);
     }
 
     return NextResponse.json(
