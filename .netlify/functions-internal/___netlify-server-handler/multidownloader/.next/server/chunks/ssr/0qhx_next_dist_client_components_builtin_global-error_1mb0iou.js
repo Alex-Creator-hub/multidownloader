@@ -1,3 +1,0 @@
-module.exports=[37714,(a,b,c)=>{let{createClientModuleProxy:d}=a.r(45737);a.n(d("[project]/multidownloader/node_modules/next/dist/client/components/builtin/global-error.js <module evaluation>"))},1531,(a,b,c)=>{let{createClientModuleProxy:d}=a.r(45737);a.n(d("[project]/multidownloader/node_modules/next/dist/client/components/builtin/global-error.js"))},53956,a=>{"use strict";a.i(37714);var b=a.i(1531);a.n(b)},7028,a=>{a.n(a.i(53956))}];
-
-//# sourceMappingURL=0qhx_next_dist_client_components_builtin_global-error_1mb0iou.js.map
