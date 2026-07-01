@@ -45,16 +45,39 @@ function buildMedia(legacy: any, text: string): Media[] {
   });
 }
 
-async function getGuestToken(): Promise<string | null> {
+// ── Runtime token extraction ──
+// The bearer token & guest token are obtained at runtime from x.com's own public
+// web client. No secrets are hardcoded — this is what every browser visitor gets.
+
+async function extractBearerFromHomepage(): Promise<string | null> {
+  const html = await fetch("https://x.com/", {
+    headers: { "User-Agent": UA, "Accept-Language": "en-US,en;q=0.9" },
+  }).then(r => r.text());
+
+  // x.com's main JS bundle contains the bearer token in pattern AAAA...
+  const m = html.match(/AAAAA[0-9A-Za-z_%\-]{50,200}/);
+  if (m) return m[0];
+
+  // Also check linked JS bundles
+  const jsUrls = [...html.matchAll(/https:\/\/abs\.twimg\.com\/[^"'\s]*\.js/g)].map(x => x[0]);
+  for (const u of jsUrls.slice(0, 3)) {
+    try {
+      const js = await fetch(u, { headers: { "User-Agent": UA } }).then(r => r.text());
+      const m2 = js.match(/AAAAA[0-9A-Za-z_%\-]{50,200}/);
+      if (m2) return m2[0];
+    } catch { /* skip */ }
+  }
+
+  return null;
+}
+
+async function getOrRefreshGuestToken(bearer: string): Promise<string | null> {
   const now = Date.now();
   if (cachedGuestToken && now < cachedGuestTokenExpiry) return cachedGuestToken;
   try {
     const res = await fetch("https://api.twitter.com/1.1/guest/activate.json", {
       method: "POST",
-      headers: {
-        Authorization: "Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA",
-        "User-Agent": UA,
-      },
+      headers: { Authorization: `Bearer ${bearer}`, "User-Agent": UA },
     });
     if (!res.ok) return null;
     const data = await res.json() as { guest_token?: string };
@@ -67,18 +90,13 @@ async function getGuestToken(): Promise<string | null> {
   return null;
 }
 
-async function fetchTweetGraphQL(
-  tweetId: string, guestToken: string,
+async function queryGraphQL(
+  tweetId: string, bearer: string, guestToken: string,
 ): Promise<Media[] | null> {
   const variables = encodeURIComponent(JSON.stringify({
-    focalTweetId: tweetId,
-    with_rux_injections: false,
-    rankingMode: "Basic",
-    includePromotedContent: false,
-    withCommunity: false,
-    withQuickPromoteEligibilityTweetFields: false,
-    withBirdwatchNotes: false,
-    withVoice: false,
+    focalTweetId: tweetId, with_rux_injections: false, rankingMode: "Basic",
+    includePromotedContent: false, withCommunity: false,
+    withQuickPromoteEligibilityTweetFields: false, withBirdwatchNotes: false, withVoice: false,
   }));
   const features = encodeURIComponent(JSON.stringify({
     tweets: { enabled: true, version: "v3" },
@@ -101,13 +119,13 @@ async function fetchTweetGraphQL(
     longform_notetweets_richtext_consumption_enabled: true,
     responsive_web_enhance_cards_enabled: false,
   }));
-  const fieldToggles = encodeURIComponent(JSON.stringify({ withArticleRichContentState: false }));
+  const ft = encodeURIComponent(JSON.stringify({ withArticleRichContentState: false }));
 
-  const url = `https://twitter.com/i/api/graphql/0hWvDhmW8YQ-S_ib3AZIrQ/TweetDetail?variables=${variables}&features=${features}&fieldToggles=${fieldToggles}`;
+  const url = `https://twitter.com/i/api/graphql/0hWvDhmW8YQ-S_ib3AZIrQ/TweetDetail?variables=${variables}&features=${features}&fieldToggles=${ft}`;
 
   const res = await fetch(url, {
     headers: {
-      Authorization: "Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA",
+      Authorization: `Bearer ${bearer}`,
       "X-Guest-Token": guestToken,
       "User-Agent": UA,
       "Accept-Language": "en-US,en;q=0.9",
@@ -117,86 +135,21 @@ async function fetchTweetGraphQL(
 
   const data = await res.json() as any;
   const instructions = data?.data?.threaded_conversation_with_injections_v2?.instructions || [];
-  let tweet: any = null;
   for (const instr of instructions) {
-    if (instr.type === "TimelineAddEntries") {
-      for (const entry of instr.entries || []) {
-        const result = entry?.content?.itemContent?.tweet_results?.result;
-        if (result?.__typename === "Tweet") { tweet = result; break; }
-      }
+    if (instr.type !== "TimelineAddEntries") continue;
+    for (const entry of instr.entries || []) {
+      const tweet = entry?.content?.itemContent?.tweet_results?.result;
+      if (tweet?.__typename !== "Tweet") continue;
+      const legacy = tweet.legacy || {};
+      const text = (legacy.full_text || "").slice(0, 60) || "X 媒体";
+      const media = buildMedia(legacy, text);
+      if (media.length > 0) return media;
     }
-    if (tweet) break;
   }
-  if (!tweet) return null;
-
-  const legacy = tweet.legacy || {};
-  const text = (legacy.full_text || "").slice(0, 60) || "X 媒体";
-  const media = buildMedia(legacy, text);
-  return media.length > 0 ? media : null;
+  return null;
 }
 
-async function scrapePage(url: string): Promise<{ media: Media[] | null; status: number }> {
-  const res = await fetch(url, {
-    headers: {
-      "User-Agent": UA,
-      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-      "Accept-Language": "en-US,en;q=0.9",
-    },
-    redirect: "follow",
-  });
-  if (!res.ok) return { media: null, status: res.status };
-  const html = await res.text();
-
-  // Try __NEXT_DATA__
-  const ndMatch = html.match(/<script[^>]+id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
-  if (ndMatch) {
-    try {
-      const d = JSON.parse(ndMatch[1]);
-      let tweet: any = null;
-      const tr = d?.props?.pageProps?.tweetResult;
-      if (tr?.__typename === "Tweet") tweet = tr;
-      if (!tweet) {
-        for (const e of d?.props?.pageProps?.conversationThread?.instructions?.[0]?.entries || []) {
-          const r = e?.content?.itemContent?.tweet_results?.result;
-          if (r?.__typename === "Tweet") { tweet = r; break; }
-        }
-      }
-      if (tweet) {
-        const l = tweet.legacy || {};
-        const t = (l.full_text || "").slice(0, 60) || "X 媒体";
-        const m = buildMedia(l, t);
-        if (m.length > 0) return { media: m, status: 200 };
-      }
-    } catch { /* skip */ }
-  }
-
-  // Try TSR/Relay dehydrated format
-  if (html.includes("extended_entities")) {
-    const results: any[] = [];
-    let pos = 0;
-    while (true) {
-      const idx = html.indexOf('__typename":"LegacyTweet"', pos);
-      if (idx === -1) break;
-      const before = html.lastIndexOf("{", Math.max(0, idx - 50));
-      pos = idx + 1;
-      if (before === -1) continue;
-      const json = extractJson(html, before);
-      if (!json) continue;
-      try {
-        const obj = JSON.parse(json);
-        if (obj.extended_entities) results.push(obj);
-      } catch { /* skip */ }
-    }
-    const all: Media[] = [];
-    for (const obj of results) {
-      const t = (obj.full_text || "").slice(0, 60) || "X 媒体";
-      all.push(...buildMedia(obj, t));
-    }
-    if (all.length > 0) return { media: all, status: 200 };
-  }
-
-  return { media: null, status: 200 };
-}
+// ── Page scraping fallback (for tweets with __NEXT_DATA__ or TSR dehydrated data) ──
 
 function extractJson(str: string, start: number): string | null {
   if (str[start] !== "{") return null;
@@ -213,6 +166,63 @@ function extractJson(str: string, start: number): string | null {
   return null;
 }
 
+function tryParseNextData(html: string): Media[] | null {
+  const m = html.match(/<script[^>]+id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
+  if (!m) return null;
+  try {
+    const d = JSON.parse(m[1]);
+    let tweet: any = d?.props?.pageProps?.tweetResult;
+    if (tweet?.__typename !== "Tweet") tweet = null;
+    if (!tweet) {
+      for (const e of d?.props?.pageProps?.conversationThread?.instructions?.[0]?.entries || []) {
+        const r = e?.content?.itemContent?.tweet_results?.result;
+        if (r?.__typename === "Tweet") { tweet = r; break; }
+      }
+    }
+    if (!tweet) return null;
+    const l = tweet.legacy || {};
+    const t = (l.full_text || "").slice(0, 60) || "X 媒体";
+    return buildMedia(l, t);
+  } catch { return null; }
+}
+
+function tryParseTSR(html: string): Media[] | null {
+  if (!html.includes("extended_entities")) return null;
+  const results: any[] = [];
+  let pos = 0;
+  while (true) {
+    const idx = html.indexOf('__typename":"LegacyTweet"', pos);
+    if (idx === -1) break;
+    const before = html.lastIndexOf("{", Math.max(0, idx - 50));
+    pos = idx + 1;
+    if (before === -1) continue;
+    const json = extractJson(html, before);
+    if (!json) continue;
+    try { const obj = JSON.parse(json); if (obj.extended_entities) results.push(obj); } catch { /* skip */ }
+  }
+  const all: Media[] = [];
+  for (const obj of results) {
+    const t = (obj.full_text || "").slice(0, 60) || "X 媒体";
+    all.push(...buildMedia(obj, t));
+  }
+  return all.length > 0 ? all : null;
+}
+
+async function scrapePage(url: string): Promise<Media[] | null> {
+  const res = await fetch(url, {
+    headers: {
+      "User-Agent": UA,
+      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "Accept-Language": "en-US,en;q=0.9",
+    },
+    redirect: "follow",
+  });
+  if (!res.ok) return null;
+  return tryParseNextData(await res.text()) ?? tryParseTSR(await res.text());
+}
+
+// ── Handler ──
+
 export async function POST(req: NextRequest) {
   const { url } = await req.json();
   if (!url || typeof url !== "string")
@@ -224,19 +234,22 @@ export async function POST(req: NextRequest) {
   const [, username, tweetId] = m;
 
   try {
-    // Method 1: Guest token + GraphQL
-    const guestToken = await getGuestToken();
-    if (guestToken) {
-      const media = await fetchTweetGraphQL(tweetId, guestToken);
-      if (media && media.length > 0) return NextResponse.json({ data: media });
+    // Method 1: Runtime Bearer extraction + Guest token + GraphQL
+    const bearer = await extractBearerFromHomepage();
+    if (bearer) {
+      const guestToken = await getOrRefreshGuestToken(bearer);
+      if (guestToken) {
+        const media = await queryGraphQL(tweetId, bearer, guestToken);
+        if (media && media.length > 0) return NextResponse.json({ data: media });
+      }
     }
 
     // Method 2: Page scraping
-    const r1 = await scrapePage(`https://x.com/${username}/status/${tweetId}`);
-    if (r1.media && r1.media.length > 0) return NextResponse.json({ data: r1.media });
+    let media = await scrapePage(`https://x.com/${username}/status/${tweetId}`);
+    if (media && media.length > 0) return NextResponse.json({ data: media });
 
-    const r2 = await scrapePage(`https://x.com/i/status/${tweetId}`);
-    if (r2.media && r2.media.length > 0) return NextResponse.json({ data: r2.media });
+    media = await scrapePage(`https://x.com/i/status/${tweetId}`);
+    if (media && media.length > 0) return NextResponse.json({ data: media });
 
     return NextResponse.json(
       { error: "该推文中没有检测到视频或图片，推文可能不存在或为私密账号" },
